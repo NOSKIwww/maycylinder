@@ -1,0 +1,432 @@
+name: Build MayCylinder
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tweak files
+        run: |
+          cat > Tweak.m <<'MAYEOF'
+          // MayCylinder - page-scroll effects for the home screen (cube, carousel, wave, stairs, scale, spin, twist, zoom).
+          // No hooks of private methods: it finds the icon scroll view at runtime and transforms icon layers while you swipe.
+          #import <UIKit/UIKit.h>
+          #import <QuartzCore/QuartzCore.h>
+          #include <math.h>
+
+          #define kDomain CFSTR("local.maycylinder")
+
+          static NSDictionary *gP;
+          static __weak UIScrollView *gSV;
+          static CGFloat gLastX = -99999;
+          static BOOL gForce = YES, gAnnounced = NO;
+          static int gFrame = 0;
+
+          static NSString *ps(NSString *k, NSString *d) { id v = gP[k]; return [v isKindOfClass:NSString.class] ? v : d; }
+          static BOOL pb(NSString *k, BOOL d) { id v = gP[k]; return [v isKindOfClass:NSNumber.class] ? [v boolValue] : d; }
+          static double pd(NSString *k, double d) { id v = gP[k]; return [v isKindOfClass:NSNumber.class] ? [v doubleValue] : d; }
+
+          static void loadPrefs(void) {
+              CFPreferencesAppSynchronize(kDomain);
+              NSMutableDictionary *m = [NSMutableDictionary dictionary];
+              CFArrayRef keys = CFPreferencesCopyKeyList(kDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+              if (keys) {
+                  CFDictionaryRef d = CFPreferencesCopyMultiple(keys, kDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+                  if (d) [m addEntriesFromDictionary:(__bridge_transfer NSDictionary *)d];
+                  CFRelease(keys);
+              }
+              for (NSString *k in @[@"enabled", @"effect", @"intensity", @"fade"]) {
+                  CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)k, kDomain);
+                  if (v) m[k] = (__bridge_transfer id)v;
+              }
+              NSDictionary *file = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/local.maycylinder.plist"];
+              if ([file isKindOfClass:NSDictionary.class]) for (id k in file) if (!m[k]) m[k] = file[k];
+              gP = m;
+          }
+
+          static BOOL isList(UIView *v) {
+              NSString *n = NSStringFromClass(v.class);
+              return [n containsString:@"IconListView"] && ![n containsString:@"Dock"] && ![n containsString:@"Floating"];
+          }
+
+          static UIScrollView *findScroll(UIView *v, int depth) {
+              if (depth > 14) return nil;
+              if ([v isKindOfClass:UIScrollView.class]) {
+                  int lists = 0;
+                  for (UIView *s in v.subviews) if (isList(s)) lists++;
+                  if (lists >= 1 && [(UIScrollView *)v isPagingEnabled]) return (UIScrollView *)v;
+              }
+              for (UIView *s in v.subviews) { UIScrollView *r = findScroll(s, depth + 1); if (r) return r; }
+              return nil;
+          }
+
+          static void toast(NSString *t) {
+              UIWindow *w = gSV.window;
+              if (!w) return;
+              UILabel *l = [UILabel new];
+              l.font = [UIFont boldSystemFontOfSize:12];
+              l.textColor = UIColor.whiteColor;
+              l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
+              l.textAlignment = NSTextAlignmentCenter;
+              l.layer.cornerRadius = 8;
+              l.layer.masksToBounds = YES;
+              l.text = t;
+              CGSize sz = [l sizeThatFits:CGSizeMake(340, 40)];
+              CGFloat ww = sz.width + 20;
+              l.frame = CGRectMake((w.bounds.size.width - ww) / 2, 70, ww, 26);
+              [w addSubview:l];
+              [UIView animateWithDuration:0.4 delay:3 options:0 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
+          }
+
+          static void applyEffect(void) {
+              UIScrollView *sv = gSV;
+              if (!sv) return;
+              BOOL on = pb(@"enabled", YES);
+              NSString *fx = ps(@"effect", @"cube");
+              double k = pd(@"intensity", 1.0);
+              BOOL fade = pb(@"fade", YES);
+              BOOL cube = [fx isEqualToString:@"cube"];
+              CGFloat W = sv.bounds.size.width;
+              if (W < 1) return;
+
+              for (UIView *L in sv.subviews) {
+                  if (!isList(L)) continue;
+                  CGFloat p = (L.center.x - sv.contentOffset.x - W / 2.0) / W;
+                  BOOL idle = !on || fabs(p) < 0.002 || fabs(p) >= 1.0;
+                  if (idle || !cube) L.layer.transform = CATransform3DIdentity;
+                  if (idle) {
+                      L.alpha = 1;
+                      for (UIView *I in L.subviews) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
+                      continue;
+                  }
+                  if (cube) {
+                      CGFloat px = p > 0 ? -W / 2.0 : W / 2.0;
+                      CATransform3D t = CATransform3DMakeTranslation(px, 0, 0);
+                      t = CATransform3DRotate(t, -p * (M_PI / 2.0) * MIN(k, 1.5), 0, 1, 0);
+                      t = CATransform3DTranslate(t, -px, 0, 0);
+                      t.m34 = -1.0 / 900.0;
+                      L.layer.transform = t;
+                      L.alpha = fade ? 1.0 - fabs(p) * 0.6 : 1.0;
+                      for (UIView *I in L.subviews) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
+                      continue;
+                  }
+                  L.alpha = 1;
+                  CGSize ls = L.bounds.size;
+                  for (UIView *I in L.subviews) {
+                      if (I.hidden || I.bounds.size.width > ls.width * 0.9) continue;
+                      CGFloat ix = (I.center.x / ls.width - 0.5) * 2.0, iy = (I.center.y / ls.height - 0.5) * 2.0;
+                      CATransform3D t = CATransform3DIdentity;
+                      t.m34 = -1.0 / 700.0;
+                      if ([fx isEqualToString:@"carousel"]) {
+                          t = CATransform3DRotate(t, p * (M_PI / 2.2) * k, 0, 1, 0);
+                          t = CATransform3DTranslate(t, 0, 0, -fabs(p) * 150 * k);
+                      } else if ([fx isEqualToString:@"wave"]) {
+                          t = CATransform3DTranslate(t, 0, sin(iy * M_PI * 1.5 + p * M_PI * 3) * 45 * fabs(p) * k, 0);
+                      } else if ([fx isEqualToString:@"stairs"]) {
+                          t = CATransform3DTranslate(t, 0, ix * p * 90 * k, 0);
+                      } else if ([fx isEqualToString:@"scale"]) {
+                          CGFloat s = MAX(0.2, 1.0 - fabs(p) * 0.45 * k);
+                          t = CATransform3DScale(t, s, s, 1);
+                      } else if ([fx isEqualToString:@"spin"]) {
+                          t = CATransform3DRotate(t, p * M_PI * k, 0, 0, 1);
+                      } else if ([fx isEqualToString:@"twist"]) {
+                          t = CATransform3DRotate(t, p * (M_PI / 2.0) * k * (1.0 + iy * 0.5), 1, 0, 0);
+                      } else if ([fx isEqualToString:@"zoom"]) {
+                          t = CATransform3DTranslate(t, 0, 0, -fabs(p) * 500 * k);
+                      }
+                      I.layer.transform = t;
+                      I.alpha = fade ? MAX(0.0, 1.0 - fabs(p) * 0.5) : 1.0;
+                  }
+              }
+          }
+
+          @interface MCTicker : NSObject
+          - (void)tick:(CADisplayLink *)dl;
+          @end
+          @implementation MCTicker
+          - (void)tick:(CADisplayLink *)dl {
+              gFrame++;
+              if (gFrame % 60 == 0) {
+                  NSDictionary *old = gP;
+                  loadPrefs();
+                  if (![old isEqualToDictionary:gP]) gForce = YES;
+              }
+              if (!gSV || !gSV.window) {
+                  if (gFrame % 30 == 0) {
+                      UIScrollView *found = nil;
+                      for (UIWindow *w in UIApplication.sharedApplication.windows) { found = findScroll(w, 0); if (found) break; }
+                      gSV = found;
+                      gForce = YES;
+                      if (found && !gAnnounced) {
+                          gAnnounced = YES;
+                          toast([NSString stringWithFormat:@"MayCylinder 0.1.0 · %lu settings · %@", (unsigned long)gP.count, ps(@"effect", @"cube")]);
+                      }
+                  }
+                  return;
+              }
+              CGFloat x = gSV.contentOffset.x;
+              if (x != gLastX || gForce) {
+                  gLastX = x;
+                  gForce = NO;
+                  applyEffect();
+              }
+          }
+          @end
+
+          static MCTicker *gTicker;
+
+          __attribute__((constructor))
+          static void maycylinder_init(void) {
+              if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
+              NSLog(@"[MayCylinder] loaded in SpringBoard");
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                  loadPrefs();
+                  gTicker = [MCTicker new];
+                  CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:gTicker selector:@selector(tick:)];
+                  [dl addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+                  NSLog(@"[MayCylinder] ticker started");
+              });
+          }
+          MAYEOF
+          cat > PrefsController.m <<'MAYEOF'
+          // MayCylinder settings: one controller that shows any pane (Root, Set1.., Set1W1..) in English or Russian.
+          #import <UIKit/UIKit.h>
+
+          @interface PSSpecifier : NSObject
+          - (id)propertyForKey:(NSString *)key;
+          @end
+
+          @interface PSViewController : UIViewController
+          @property (nonatomic, retain) PSSpecifier *specifier;
+          @end
+
+          @interface PSListController : PSViewController
+          - (NSArray *)loadSpecifiersFromPlistName:(NSString *)name target:(id)target;
+          - (void)reloadSpecifiers;
+          - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier;
+          @end
+
+          #define kDomain CFSTR("local.maycylinder")
+
+          static NSString *currentLang(void) {
+              CFPreferencesAppSynchronize(kDomain);
+              CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("language"), kDomain);
+              NSString *r = @"en";
+              if (v) {
+                  if (CFGetTypeID(v) == CFStringGetTypeID() && [(__bridge NSString *)v isEqualToString:@"ru"]) r = @"ru";
+                  CFRelease(v);
+              }
+              return r;
+          }
+
+          @interface MCPaneController : PSListController
+          @property (nonatomic, copy) NSString *loadedLang;
+          @end
+
+          @implementation MCPaneController
+
+          - (NSString *)paneName {
+              NSString *n = nil;
+              @try { n = [self.specifier propertyForKey:@"mhplist"]; } @catch (__unused id e) {}
+              return ([n isKindOfClass:NSString.class] && n.length) ? n : @"Root";
+          }
+
+          - (NSArray *)specifiers {
+              NSArray *s = nil;
+              @try { s = [self valueForKey:@"_specifiers"]; } @catch (__unused id e) {}
+              if (!s) {
+                  NSString *lang = currentLang();
+                  s = [self loadSpecifiersFromPlistName:[NSString stringWithFormat:@"%@_%@", [self paneName], lang] target:self];
+                  @try { [self setValue:s forKey:@"_specifiers"]; } @catch (__unused id e) {}
+                  self.loadedLang = lang;
+              }
+              return s;
+          }
+
+          - (void)refreshIfLangChanged {
+              if (self.loadedLang && ![self.loadedLang isEqualToString:currentLang()]) {
+                  @try { [self setValue:nil forKey:@"_specifiers"]; } @catch (__unused id e) {}
+                  [self reloadSpecifiers];
+              }
+          }
+
+          - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+              [super setPreferenceValue:value specifier:specifier];
+              [self refreshIfLangChanged];
+          }
+
+          - (void)viewWillAppear:(BOOL)animated {
+              [super viewWillAppear:animated];
+              [self refreshIfLangChanged];
+          }
+
+          - (void)resetData {
+              CFArrayRef keys = CFPreferencesCopyKeyList(kDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+              if (keys) {
+                  NSMutableArray *del = [NSMutableArray array];
+                  for (NSString *k in (__bridge NSArray *)keys) if (![k isEqualToString:@"language"]) [del addObject:k];
+                  CFPreferencesSetMultiple(NULL, (__bridge CFArrayRef)del, kDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+                  CFRelease(keys);
+              }
+              CFPreferencesAppSynchronize(kDomain);
+              CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("local.maycylinder.reload"), NULL, NULL, true);
+              @try { [self setValue:nil forKey:@"_specifiers"]; } @catch (__unused id e) {}
+              [self reloadSpecifiers];
+          }
+
+          @end
+          MAYEOF
+          cat > gen_prefs.py <<'MAYEOF'
+          # Generates the MayCylinder settings pane (English + Russian), the icon and bundle files into ./bundle
+          import plistlib, os, zlib, struct
+          D = 'local.maycylinder'
+          RU = {
+           'Language':'Язык','Default language is English.':'По умолчанию английский.','Enable MayCylinder':'Включить MayCylinder','Effect':'Эффект',
+           'Cube':'Куб','Carousel':'Карусель','Wave':'Волна','Stairs':'Лесенка','Scale':'Масштаб','Spin':'Вращение','Twist':'Скручивание','Zoom':'Отдаление',
+           'Intensity':'Сила эффекта','Fade icons while swiping':'Затухание при перелистывании','Swipe between home screen pages to see the effect.':'Листай страницы домашнего экрана, чтобы увидеть эффект.',
+           'Reset Data':'Сбросить данные','Reset':'Сброс','Resets every MayCylinder setting except language.':'Сбрасывает все настройки MayCylinder, кроме языка.',
+           'Credits':'Авторы','Inspired by Cylinder. MayCylinder is an independent rewrite that works on iOS 27.':'По мотивам Cylinder. MayCylinder — независимая реализация для iOS 27.',
+          }
+          LANG = 'en'
+          def T(s): return RU.get(s, s) if LANG == 'ru' else s
+          def grp(label=None, foot=None):
+              d = {'cell': 'PSGroupCell'}
+              if label: d['label'] = T(label)
+              if foot: d['footerText'] = T(foot)
+              return d
+          def sw(key, label, default): return {'cell':'PSSwitchCell','label':T(label),'default':default,'defaults':D,'key':key}
+          def lst(key, label, default, opts):
+              return {'cell':'PSLinkListCell','label':T(label),'default':default,'defaults':D,'key':key,'detail':'PSListItemsController',
+                      'validTitles':[T(a) for a, b in opts],'validValues':[b for a, b in opts]}
+          def sld(key, default, mn, mx): return {'cell':'PSSliderCell','default':float(default),'defaults':D,'key':key,'min':float(mn),'max':float(mx),'showValue':True}
+          FX = [('Cube','cube'),('Carousel','carousel'),('Wave','wave'),('Stairs','stairs'),('Scale','scale'),('Spin','spin'),('Twist','twist'),('Zoom','zoom')]
+          def root(with_lang=True, fallback=False):
+              it = []
+              if with_lang:
+                  it += [grp('Language','Default language is English.'),
+                         {'cell':'PSLinkListCell','label':T('Language'),'default':'en','defaults':D,'key':'language','detail':'PSListItemsController','validTitles':['English','Русский'],'validValues':['en','ru']}]
+              it += [grp('MayCylinder','Swipe between home screen pages to see the effect.'), sw('enabled','Enable MayCylinder',True),
+                     lst('effect','Effect','cube',FX),
+                     grp('Intensity'), sld('intensity',1,0.2,2),
+                     sw('fade','Fade icons while swiping',True)]
+              if with_lang:
+                  it += [grp('Reset','Resets every MayCylinder setting except language.'), {'cell':'PSButtonCell','label':T('Reset Data'),'action':'resetData'}]
+              it += [grp('Credits','Inspired by Cylinder. MayCylinder is an independent rewrite that works on iOS 27.')]
+              d = {'title': 'MayCylinder', 'items': it}
+              if fallback: d['entry'] = {'cell':'PSLinkCell','label':'MayCylinder','icon':'icon.png'}
+              return d
+          def icon(size=58):
+              rows = []
+              for y in range(size):
+                  row = bytearray([0])
+                  for x in range(size):
+                      r, g, b = 16, 20, 40
+                      cx, cy = (x * 3) // size, (y * 3) // size
+                      lx, ly = (x * 3 % size) / size, (y * 3 % size) / size
+                      if 0.2 < lx < 0.8 and 0.2 < ly < 0.8:
+                          shift = (cx - 1) * 0 + (0.0 if cy != 1 else 0.0)
+                          r, g, b = 60 + cx * 70, 200 - cy * 50, 255 - cx * 40
+                      row += bytes((max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))))
+                  rows.append(bytes(row))
+              raw = b''.join(rows)
+              ch = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+              return b'\x89PNG\r\n\x1a\n' + ch(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) + ch(b'IDAT', zlib.compress(raw, 9)) + ch(b'IEND', b'')
+          os.makedirs('bundle', exist_ok=True)
+          w = lambda n, d: open(os.path.join('bundle', n), 'wb').write(plistlib.dumps(d, fmt=plistlib.FMT_XML))
+          for LANG in ('en', 'ru'): w('Root_%s.plist' % LANG, root())
+          LANG = 'en'
+          w('PrefsFallback.plist', root(with_lang=False, fallback=True))
+          w('Info.plist', {'CFBundleDevelopmentRegion':'en','CFBundleExecutable':'MayCylinderPrefs','CFBundleIdentifier':'local.maycylinderprefs','CFBundleInfoDictionaryVersion':'6.0',
+                           'CFBundleName':'MayCylinderPrefs','CFBundlePackageType':'BNDL','CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1','NSPrincipalClass':'MCPaneController'})
+          w('PrefsEntry.plist', {'entry':{'bundle':'MayCylinderPrefs','cell':'PSLinkCell','detail':'MCPaneController','isController':True,'label':'MayCylinder','icon':'icon.png'}})
+          open('bundle/icon.png', 'wb').write(icon())
+          print('generated', len(os.listdir('bundle')), 'files')
+          MAYEOF
+          cat > MayCylinder.plist <<'MAYEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>Filter</key><dict><key>Bundles</key><array><string>com.apple.springboard</string></array></dict></dict></plist>
+          MAYEOF
+          cat > control <<'MAYEOF'
+          Package: local.maycylinder
+          Name: MayCylinder
+          Version: 0.1.0
+          Architecture: iphoneos-arm64e
+          Description: Cylinder-style home screen page effects (cube, carousel, wave, stairs, scale, spin, twist, zoom) with a settings pane.
+          Maintainer: Local Build
+          Author: Local Build
+          Section: Tweaks
+          Depends: ellekit | mobilesubstrate
+          MAYEOF
+          python3 gen_prefs.py
+          ls -la bundle
+
+      - name: Install tools
+        run: brew install ldid dpkg
+
+      - name: Compile tweak (plain clang from Xcode)
+        run: |
+          set -ex
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          COMMON="-isysroot $SDK -miphoneos-version-min=14.0 -fobjc-arc -fmodules -Wno-deprecated-declarations -O2 -framework UIKit -framework Foundation"
+          TW="$COMMON -dynamiclib -framework QuartzCore -install_name /Library/MobileSubstrate/DynamicLibraries/MayCylinder.dylib"
+          if xcrun --sdk iphoneos clang -arch arm64 -arch arm64e $TW Tweak.m -o MayCylinder.dylib; then
+            echo "built arm64 + arm64e"
+          else
+            echo "arm64e failed, building arm64 only"
+            xcrun --sdk iphoneos clang -arch arm64 $TW Tweak.m -o MayCylinder.dylib
+          fi
+          ldid -S MayCylinder.dylib
+          lipo -info MayCylinder.dylib
+          otool -L MayCylinder.dylib
+
+      - name: Compile settings pane (optional, falls back to a simple pane)
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          PF="-isysroot $SDK -miphoneos-version-min=14.0 -fobjc-arc -Wno-deprecated-declarations -O2 -bundle -undefined dynamic_lookup -framework UIKit -framework Foundation"
+          if xcrun --sdk iphoneos clang -arch arm64 -arch arm64e $PF PrefsController.m -o MayCylinderPrefs \
+             || xcrun --sdk iphoneos clang -arch arm64 $PF PrefsController.m -o MayCylinderPrefs; then
+            ldid -S MayCylinderPrefs && lipo -info MayCylinderPrefs && touch prefs_ok
+          else
+            echo "settings pane failed to compile, using the simple pane"
+          fi
+
+      - name: Build deb (iphoneos-arm64e, rootful /Library)
+        run: |
+          set -ex
+          mkdir -p pkg/DEBIAN pkg/Library/MobileSubstrate/DynamicLibraries pkg/Library/PreferenceLoader/Preferences out
+          cp MayCylinder.dylib MayCylinder.plist pkg/Library/MobileSubstrate/DynamicLibraries/
+          chmod 755 pkg/Library/MobileSubstrate/DynamicLibraries/MayCylinder.dylib
+          if [ -f prefs_ok ]; then
+            B=pkg/Library/PreferenceBundles/MayCylinderPrefs.bundle
+            mkdir -p "$B"
+            cp MayCylinderPrefs "$B/MayCylinderPrefs"
+            chmod 755 "$B/MayCylinderPrefs"
+            cp bundle/Info.plist bundle/Root_*.plist bundle/icon.png "$B/"
+            cp bundle/PrefsEntry.plist pkg/Library/PreferenceLoader/Preferences/MayCylinder.plist
+          else
+            cp bundle/PrefsFallback.plist pkg/Library/PreferenceLoader/Preferences/MayCylinder.plist
+            cp bundle/icon.png pkg/Library/PreferenceLoader/Preferences/icon.png
+          fi
+          cp control pkg/DEBIAN/control
+          echo "Installed-Size: $(du -sk pkg/Library | cut -f1)" >> pkg/DEBIAN/control
+          dpkg-deb --root-owner-group -Zlzma -b pkg out/maycylinder_iphoneos-arm64e.deb || dpkg-deb --root-owner-group -Zgzip -b pkg out/maycylinder_iphoneos-arm64e.deb
+          dpkg-deb -I out/maycylinder_iphoneos-arm64e.deb
+          dpkg-deb -c out/maycylinder_iphoneos-arm64e.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maycylinder-deb
+          path: out/*.deb
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: MayCylinder build ${{ github.run_number }}
+          files: out/*.deb
