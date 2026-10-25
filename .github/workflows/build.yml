@@ -17,6 +17,7 @@ jobs:
           // No hooks of private methods: it finds the icon scroll view at runtime and transforms icon layers while you swipe.
           #import <UIKit/UIKit.h>
           #import <QuartzCore/QuartzCore.h>
+          #include <notify.h>
           #include <math.h>
 
           #define kDomain CFSTR("local.maycylinder")
@@ -30,6 +31,20 @@ jobs:
           static NSString *ps(NSString *k, NSString *d) { id v = gP[k]; return [v isKindOfClass:NSString.class] ? v : d; }
           static BOOL pb(NSString *k, BOOL d) { id v = gP[k]; return [v isKindOfClass:NSNumber.class] ? [v boolValue] : d; }
           static double pd(NSString *k, double d) { id v = gP[k]; return [v isKindOfClass:NSNumber.class] ? [v doubleValue] : d; }
+
+          static NSArray *fxNames(void) { return @[@"cylinder", @"cube", @"carousel", @"wave", @"stairs", @"scale", @"spin", @"twist", @"zoom"]; }
+          static int gStateTok = 0;
+
+          static void mergeState(NSMutableDictionary *m) {
+              uint64_t st = 0;
+              if (gStateTok && notify_get_state(gStateTok, &st) == NOTIFY_STATUS_OK && ((st >> 63) & 1)) {
+                  m[@"enabled"] = @((BOOL)(st & 1));
+                  m[@"fade"] = @((BOOL)((st >> 1) & 1));
+                  NSUInteger idx = (NSUInteger)((st >> 2) & 0x3f);
+                  if (idx < fxNames().count) m[@"effect"] = fxNames()[idx];
+                  m[@"intensity"] = @(((st >> 8) & 0xff) / 50.0);
+              }
+          }
 
           static void loadPrefs(void) {
               CFPreferencesAppSynchronize(kDomain);
@@ -46,6 +61,7 @@ jobs:
               }
               NSDictionary *file = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/local.maycylinder.plist"];
               if ([file isKindOfClass:NSDictionary.class]) for (id k in file) if (!m[k]) m[k] = file[k];
+              mergeState(m);
               gP = m;
           }
 
@@ -98,6 +114,7 @@ jobs:
               BOOL on = pb(@"enabled", YES);
               NSString *fx = ps(@"effect", @"cylinder");
               double k = pd(@"intensity", 1.5);
+              double ke = MIN(k, 1.5);
               BOOL fade = pb(@"fade", YES);
               BOOL cube = [fx isEqualToString:@"cube"];
               CGFloat W = sv.bounds.size.width;
@@ -111,7 +128,7 @@ jobs:
                   if (icons.count == 0) {
                       for (UIView *s in L.subviews) if (!s.hidden && s.bounds.size.width < L.bounds.size.width * 0.9) [icons addObject:s];
                   }
-                  BOOL idle = !on || fabs(p) < 0.002 || fabs(p) >= 1.0;
+                  BOOL idle = !on || fabs(p) < 0.002 || fabs(p) >= 0.98;
                   if (idle || !cube) L.layer.transform = CATransform3DIdentity;
                   if (idle) {
                       L.alpha = 1;
@@ -121,7 +138,7 @@ jobs:
                   if (cube) {
                       CGFloat px = p > 0 ? -W / 2.0 : W / 2.0;
                       CATransform3D t = CATransform3DMakeTranslation(px, 0, 0);
-                      t = CATransform3DRotate(t, -p * (M_PI / 2.0) * MIN(k, 1.5), 0, 1, 0);
+                      t = CATransform3DRotate(t, -p * (M_PI / 2.0) * ke, 0, 1, 0);
                       t = CATransform3DTranslate(t, -px, 0, 0);
                       t.m34 = -1.0 / 900.0;
                       L.layer.transform = t;
@@ -141,12 +158,12 @@ jobs:
                           CGPoint sp = [I.superview convertPoint:I.center toView:nil];
                           CGFloat Xn = sp.x - W / 2.0;
                           CGFloat R = W * 0.9 / MAX(k, 0.3);
-                          CGFloat a = MIN(1.0, fabs(p) * 2.5);
-                          CGFloat th = MAX(-1.4, MIN(1.4, Xn / R));
+                          CGFloat a = MIN(1.0, fabs(p) * 3.0) * MIN(1.0, (1.0 - fabs(p)) * 3.0);
+                          CGFloat th = MAX(-1.0, MIN(1.0, Xn / R));
                           t = CATransform3DTranslate(t, a * (R * sin(th) - Xn), 0, a * R * (1.0 - cos(th)) * 1.6);
-                          t = CATransform3DRotate(t, -a * th * 1.2, 0, 1, 0);
+                          t = CATransform3DRotate(t, -a * th * 1.1, 0, 1, 0);
                       } else if ([fx isEqualToString:@"carousel"]) {
-                          t = CATransform3DRotate(t, p * (M_PI / 2.2) * k, 0, 1, 0);
+                          t = CATransform3DRotate(t, p * (M_PI / 2.2) * ke, 0, 1, 0);
                           t = CATransform3DTranslate(t, 0, 0, -fabs(p) * 150 * k);
                       } else if ([fx isEqualToString:@"wave"]) {
                           t = CATransform3DTranslate(t, 0, sin(iy * M_PI * 1.5 + p * M_PI * 3) * 45 * fabs(p) * k, 0);
@@ -156,9 +173,9 @@ jobs:
                           CGFloat s = MAX(0.2, 1.0 - fabs(p) * 0.45 * k);
                           t = CATransform3DScale(t, s, s, 1);
                       } else if ([fx isEqualToString:@"spin"]) {
-                          t = CATransform3DRotate(t, p * M_PI * k, 0, 0, 1);
+                          t = CATransform3DRotate(t, p * (M_PI / 2.0) * ke, 0, 0, 1);
                       } else if ([fx isEqualToString:@"twist"]) {
-                          t = CATransform3DRotate(t, p * (M_PI / 2.0) * k * (1.0 + iy * 0.5), 1, 0, 0);
+                          t = CATransform3DRotate(t, p * (M_PI / 2.5) * ke * (1.0 + iy * 0.3), 1, 0, 0);
                       } else if ([fx isEqualToString:@"zoom"]) {
                           t = CATransform3DTranslate(t, 0, 0, -fabs(p) * 500 * k);
                       }
@@ -190,7 +207,7 @@ jobs:
                       gForce = YES;
                       if (found && !gAnnounced) {
                           gAnnounced = YES;
-                          toast([NSString stringWithFormat:@"MayCylinder 0.2.0 · %lu settings · %@", (unsigned long)gP.count, ps(@"effect", @"cylinder")]);
+                          toast([NSString stringWithFormat:@"MayCylinder 0.2.1 · %lu settings · %@", (unsigned long)gP.count, ps(@"effect", @"cylinder")]);
                       }
                   }
                   return;
@@ -222,6 +239,16 @@ jobs:
               NSLog(@"[MayCylinder] loaded in SpringBoard");
               dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                   loadPrefs();
+                  notify_register_check("local.maycylinder.state", &gStateTok);
+                  static int tok2;
+                  notify_register_dispatch("local.maycylinder.state", &tok2, dispatch_get_main_queue(), ^(int t) {
+                      NSDictionary *old = gP;
+                      loadPrefs();
+                      gForce = YES;
+                      if (![old isEqualToDictionary:gP])
+                          toast([NSString stringWithFormat:@"MayCylinder: %@ · %.1f", ps(@"effect", @"cylinder"), pd(@"intensity", 1.5)]);
+                  });
+                  loadPrefs();
                   CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, onReload,
                       CFSTR("local.maycylinder.reload"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
                   gTicker = [MCTicker new];
@@ -234,6 +261,7 @@ jobs:
           cat > PrefsController.m <<'MAYEOF'
           // MayCylinder settings: one controller that shows any pane (Root, Set1.., Set1W1..) in English or Russian.
           #import <UIKit/UIKit.h>
+          #include <notify.h>
 
           @interface PSSpecifier : NSObject
           - (id)propertyForKey:(NSString *)key;
@@ -260,6 +288,31 @@ jobs:
                   CFRelease(v);
               }
               return r;
+          }
+
+          // Second channel to SpringBoard (works even if cfprefsd writes are blocked for this app).
+          static void pushState(void) {
+              CFPreferencesAppSynchronize(kDomain);
+              NSArray *names = @[@"cylinder", @"cube", @"carousel", @"wave", @"stairs", @"scale", @"spin", @"twist", @"zoom"];
+              NSString *fx = @"cylinder"; double k = 1.5; BOOL en = YES, fade = YES;
+              CFPropertyListRef v = CFPreferencesCopyAppValue(CFSTR("effect"), kDomain);
+              if (v) { if (CFGetTypeID(v) == CFStringGetTypeID()) fx = [(__bridge NSString *)v copy]; CFRelease(v); }
+              v = CFPreferencesCopyAppValue(CFSTR("intensity"), kDomain);
+              if (v) { if (CFGetTypeID(v) == CFNumberGetTypeID()) CFNumberGetValue(v, kCFNumberDoubleType, &k); CFRelease(v); }
+              v = CFPreferencesCopyAppValue(CFSTR("enabled"), kDomain);
+              if (v) { if (CFGetTypeID(v) == CFBooleanGetTypeID()) en = CFBooleanGetValue(v); CFRelease(v); }
+              v = CFPreferencesCopyAppValue(CFSTR("fade"), kDomain);
+              if (v) { if (CFGetTypeID(v) == CFBooleanGetTypeID()) fade = CFBooleanGetValue(v); CFRelease(v); }
+              NSUInteger idx = [names indexOfObject:fx];
+              if (idx == NSNotFound) idx = 0;
+              long ik = lround(k * 50.0);
+              if (ik < 0) ik = 0;
+              if (ik > 255) ik = 255;
+              uint64_t st = (1ULL << 63) | (en ? 1ULL : 0ULL) | (fade ? 2ULL : 0ULL) | ((uint64_t)idx << 2) | ((uint64_t)ik << 8);
+              static int tok = 0;
+              if (!tok) notify_register_check("local.maycylinder.state", &tok);
+              notify_set_state(tok, st);
+              notify_post("local.maycylinder.state");
           }
 
           @interface MCPaneController : PSListController
@@ -295,11 +348,13 @@ jobs:
 
           - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
               [super setPreferenceValue:value specifier:specifier];
+              pushState();
               [self refreshIfLangChanged];
           }
 
           - (void)viewWillAppear:(BOOL)animated {
               [super viewWillAppear:animated];
+              pushState();
               [self refreshIfLangChanged];
           }
 
@@ -313,6 +368,7 @@ jobs:
               }
               CFPreferencesAppSynchronize(kDomain);
               CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), CFSTR("local.maycylinder.reload"), NULL, NULL, true);
+              pushState();
               @try { [self setValue:nil forKey:@"_specifiers"]; } @catch (__unused id e) {}
               [self reloadSpecifiers];
           }
@@ -395,7 +451,7 @@ jobs:
           cat > control <<'MAYEOF'
           Package: local.maycylinder
           Name: MayCylinder
-          Version: 0.2.0
+          Version: 0.2.1
           Architecture: iphoneos-arm64e
           Description: Cylinder-style home screen page effects (cube, carousel, wave, stairs, scale, spin, twist, zoom) with a settings pane.
           Maintainer: Local Build
