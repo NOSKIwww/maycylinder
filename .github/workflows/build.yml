@@ -65,6 +65,15 @@ jobs:
               return nil;
           }
 
+          static void collectIcons(UIView *v, NSMutableArray *out, int depth) {
+              for (UIView *s in v.subviews) {
+                  if (s.hidden) continue;
+                  NSString *n = NSStringFromClass(s.class);
+                  if ([n containsString:@"IconView"] && ![n containsString:@"ListView"]) [out addObject:s];
+                  else if (depth < 3 && s.subviews.count > 0 && ![n containsString:@"Label"]) collectIcons(s, out, depth + 1);
+              }
+          }
+
           static void toast(NSString *t) {
               UIWindow *w = gSV.window;
               if (!w) return;
@@ -87,8 +96,8 @@ jobs:
               UIScrollView *sv = gSV;
               if (!sv) return;
               BOOL on = pb(@"enabled", YES);
-              NSString *fx = ps(@"effect", @"cube");
-              double k = pd(@"intensity", 1.0);
+              NSString *fx = ps(@"effect", @"cylinder");
+              double k = pd(@"intensity", 1.5);
               BOOL fade = pb(@"fade", YES);
               BOOL cube = [fx isEqualToString:@"cube"];
               CGFloat W = sv.bounds.size.width;
@@ -97,11 +106,16 @@ jobs:
               for (UIView *L in sv.subviews) {
                   if (!isList(L)) continue;
                   CGFloat p = (L.center.x - sv.contentOffset.x - W / 2.0) / W;
+                  NSMutableArray *icons = [NSMutableArray array];
+                  collectIcons(L, icons, 0);
+                  if (icons.count == 0) {
+                      for (UIView *s in L.subviews) if (!s.hidden && s.bounds.size.width < L.bounds.size.width * 0.9) [icons addObject:s];
+                  }
                   BOOL idle = !on || fabs(p) < 0.002 || fabs(p) >= 1.0;
                   if (idle || !cube) L.layer.transform = CATransform3DIdentity;
                   if (idle) {
                       L.alpha = 1;
-                      for (UIView *I in L.subviews) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
+                      for (UIView *I in icons) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
                       continue;
                   }
                   if (cube) {
@@ -112,17 +126,26 @@ jobs:
                       t.m34 = -1.0 / 900.0;
                       L.layer.transform = t;
                       L.alpha = fade ? 1.0 - fabs(p) * 0.6 : 1.0;
-                      for (UIView *I in L.subviews) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
+                      for (UIView *I in icons) { I.layer.transform = CATransform3DIdentity; I.alpha = 1; }
                       continue;
                   }
                   L.alpha = 1;
                   CGSize ls = L.bounds.size;
-                  for (UIView *I in L.subviews) {
+                  for (UIView *I in icons) {
                       if (I.hidden || I.bounds.size.width > ls.width * 0.9) continue;
-                      CGFloat ix = (I.center.x / ls.width - 0.5) * 2.0, iy = (I.center.y / ls.height - 0.5) * 2.0;
+                      CGPoint lc = [L convertPoint:I.center fromView:I.superview];
+                      CGFloat ix = (lc.x / ls.width - 0.5) * 2.0, iy = (lc.y / ls.height - 0.5) * 2.0;
                       CATransform3D t = CATransform3DIdentity;
                       t.m34 = -1.0 / 700.0;
-                      if ([fx isEqualToString:@"carousel"]) {
+                      if ([fx isEqualToString:@"cylinder"]) {
+                          CGPoint sp = [I.superview convertPoint:I.center toView:nil];
+                          CGFloat Xn = sp.x - W / 2.0;
+                          CGFloat R = W * 0.9 / MAX(k, 0.3);
+                          CGFloat a = MIN(1.0, fabs(p) * 2.5);
+                          CGFloat th = MAX(-1.4, MIN(1.4, Xn / R));
+                          t = CATransform3DTranslate(t, a * (R * sin(th) - Xn), 0, a * R * (1.0 - cos(th)) * 1.6);
+                          t = CATransform3DRotate(t, -a * th * 1.2, 0, 1, 0);
+                      } else if ([fx isEqualToString:@"carousel"]) {
                           t = CATransform3DRotate(t, p * (M_PI / 2.2) * k, 0, 1, 0);
                           t = CATransform3DTranslate(t, 0, 0, -fabs(p) * 150 * k);
                       } else if ([fx isEqualToString:@"wave"]) {
@@ -151,10 +174,13 @@ jobs:
           @implementation MCTicker
           - (void)tick:(CADisplayLink *)dl {
               gFrame++;
-              if (gFrame % 60 == 0) {
+              if (gFrame % 20 == 0) {
                   NSDictionary *old = gP;
                   loadPrefs();
-                  if (![old isEqualToDictionary:gP]) gForce = YES;
+                  if (![old isEqualToDictionary:gP]) {
+                      gForce = YES;
+                      toast([NSString stringWithFormat:@"MayCylinder: %@ · %.1f", ps(@"effect", @"cylinder"), pd(@"intensity", 1.5)]);
+                  }
               }
               if (!gSV || !gSV.window) {
                   if (gFrame % 30 == 0) {
@@ -164,7 +190,7 @@ jobs:
                       gForce = YES;
                       if (found && !gAnnounced) {
                           gAnnounced = YES;
-                          toast([NSString stringWithFormat:@"MayCylinder 0.1.0 · %lu settings · %@", (unsigned long)gP.count, ps(@"effect", @"cube")]);
+                          toast([NSString stringWithFormat:@"MayCylinder 0.2.0 · %lu settings · %@", (unsigned long)gP.count, ps(@"effect", @"cylinder")]);
                       }
                   }
                   return;
@@ -180,12 +206,24 @@ jobs:
 
           static MCTicker *gTicker;
 
+          static void onReload(CFNotificationCenterRef c, void *o, CFNotificationName n, const void *obj, CFDictionaryRef u) {
+              dispatch_async(dispatch_get_main_queue(), ^{
+                  NSDictionary *old = gP;
+                  loadPrefs();
+                  gForce = YES;
+                  if (![old isEqualToDictionary:gP])
+                      toast([NSString stringWithFormat:@"MayCylinder: %@ · %.1f", ps(@"effect", @"cylinder"), pd(@"intensity", 1.5)]);
+              });
+          }
+
           __attribute__((constructor))
           static void maycylinder_init(void) {
               if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
               NSLog(@"[MayCylinder] loaded in SpringBoard");
               dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
                   loadPrefs();
+                  CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, onReload,
+                      CFSTR("local.maycylinder.reload"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
                   gTicker = [MCTicker new];
                   CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:gTicker selector:@selector(tick:)];
                   [dl addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -287,7 +325,7 @@ jobs:
           D = 'local.maycylinder'
           RU = {
            'Language':'Язык','Default language is English.':'По умолчанию английский.','Enable MayCylinder':'Включить MayCylinder','Effect':'Эффект',
-           'Cube':'Куб','Carousel':'Карусель','Wave':'Волна','Stairs':'Лесенка','Scale':'Масштаб','Spin':'Вращение','Twist':'Скручивание','Zoom':'Отдаление',
+           'Cylinder':'Цилиндр','Cube':'Куб','Carousel':'Карусель','Wave':'Волна','Stairs':'Лесенка','Scale':'Масштаб','Spin':'Вращение','Twist':'Скручивание','Zoom':'Отдаление',
            'Intensity':'Сила эффекта','Fade icons while swiping':'Затухание при перелистывании','Swipe between home screen pages to see the effect.':'Листай страницы домашнего экрана, чтобы увидеть эффект.',
            'Reset Data':'Сбросить данные','Reset':'Сброс','Resets every MayCylinder setting except language.':'Сбрасывает все настройки MayCylinder, кроме языка.',
            'Credits':'Авторы','Inspired by Cylinder. MayCylinder is an independent rewrite that works on iOS 27.':'По мотивам Cylinder. MayCylinder — независимая реализация для iOS 27.',
@@ -299,20 +337,22 @@ jobs:
               if label: d['label'] = T(label)
               if foot: d['footerText'] = T(foot)
               return d
-          def sw(key, label, default): return {'cell':'PSSwitchCell','label':T(label),'default':default,'defaults':D,'key':key}
+          N = 'local.maycylinder.reload'
+          def pn(d): d['PostNotification'] = N; return d
+          def sw(key, label, default): return pn({'cell':'PSSwitchCell','label':T(label),'default':default,'defaults':D,'key':key})
           def lst(key, label, default, opts):
-              return {'cell':'PSLinkListCell','label':T(label),'default':default,'defaults':D,'key':key,'detail':'PSListItemsController',
-                      'validTitles':[T(a) for a, b in opts],'validValues':[b for a, b in opts]}
-          def sld(key, default, mn, mx): return {'cell':'PSSliderCell','default':float(default),'defaults':D,'key':key,'min':float(mn),'max':float(mx),'showValue':True}
-          FX = [('Cube','cube'),('Carousel','carousel'),('Wave','wave'),('Stairs','stairs'),('Scale','scale'),('Spin','spin'),('Twist','twist'),('Zoom','zoom')]
+              return pn({'cell':'PSLinkListCell','label':T(label),'default':default,'defaults':D,'key':key,'detail':'PSListItemsController',
+                      'validTitles':[T(a) for a, b in opts],'validValues':[b for a, b in opts]})
+          def sld(key, default, mn, mx): return pn({'cell':'PSSliderCell','default':float(default),'defaults':D,'key':key,'min':float(mn),'max':float(mx),'showValue':True})
+          FX = [('Cylinder','cylinder'),('Cube','cube'),('Carousel','carousel'),('Wave','wave'),('Stairs','stairs'),('Scale','scale'),('Spin','spin'),('Twist','twist'),('Zoom','zoom')]
           def root(with_lang=True, fallback=False):
               it = []
               if with_lang:
                   it += [grp('Language','Default language is English.'),
                          {'cell':'PSLinkListCell','label':T('Language'),'default':'en','defaults':D,'key':'language','detail':'PSListItemsController','validTitles':['English','Русский'],'validValues':['en','ru']}]
               it += [grp('MayCylinder','Swipe between home screen pages to see the effect.'), sw('enabled','Enable MayCylinder',True),
-                     lst('effect','Effect','cube',FX),
-                     grp('Intensity'), sld('intensity',1,0.2,2),
+                     lst('effect','Effect','cylinder',FX),
+                     grp('Intensity'), sld('intensity',1.5,0.3,3),
                      sw('fade','Fade icons while swiping',True)]
               if with_lang:
                   it += [grp('Reset','Resets every MayCylinder setting except language.'), {'cell':'PSButtonCell','label':T('Reset Data'),'action':'resetData'}]
@@ -355,7 +395,7 @@ jobs:
           cat > control <<'MAYEOF'
           Package: local.maycylinder
           Name: MayCylinder
-          Version: 0.1.0
+          Version: 0.2.0
           Architecture: iphoneos-arm64e
           Description: Cylinder-style home screen page effects (cube, carousel, wave, stairs, scale, spin, twist, zoom) with a settings pane.
           Maintainer: Local Build
